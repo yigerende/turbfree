@@ -62,7 +62,10 @@ EDITABLE_FIELDS = [
     {
         "key": "CHATGPT_PASSWORD_MODE", "file": "password.py", "type": "str", "group": "注册方式",
         "label": "ChatGPT 密码模式", "help": "fixed=固定密码；random=每个账号自动生成随机强密码",
-        "options": ["random", "fixed"],
+        "options": [
+            {"value": "random", "label": "自动随机密码"},
+            {"value": "fixed", "label": "固定密码"},
+        ],
     },
     {
         "key": "CHATGPT_FIXED_PASSWORD", "file": "password.py", "type": "str", "group": "注册方式",
