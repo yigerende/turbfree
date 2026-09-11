@@ -184,10 +184,73 @@ def run_registration(
     #   cloak        = CloakBrowser + Playwright/Selenium 适配层
     #   browser_use  = Browser Use Cloud stealth Chromium + Playwright
     #   skyvern      = Skyvern Browser Sessions + Playwright
+    def finish(result):
+        # 注册 AT 与后续 Codex OAuth 是两个阶段；只要真实 session 已返回 AT，
+        # 就应先导入 Space Console，不能因后续 OAuth 失败丢掉可用的 Free 账号。
+        if isinstance(result, dict) and result.get("access_token"):
+            from core.remote_import import push_registration
+            result = dict(result)
+            remote_result = push_registration(result)
+            result["remote_import"] = remote_result
+            # Keep the account list's push indicator in sync with the actual
+            # automatic push result. The registration result uses the local
+            # account row id returned by save_account_data().
+            try:
+                from core import db as _db
+                account_id = result.get("account_id")
+                if account_id is not None and str(account_id).strip().lstrip("-").isdigit():
+                    local_id = int(account_id)
+                else:
+                    # Some registration drivers may omit the local row id in
+                    # their compact result. Resolve it by email so the list
+                    # indicator is still updated after a successful push.
+                    stored = _db.get_account_by_email(str(result.get("email") or "").strip())
+                    local_id = stored.get("id") if stored else None
+                if local_id is not None:
+                    _db.update_account_remote_import(int(local_id), remote_result)
+            except Exception as exc:
+                logger.debug("[远程导入] 回写账号推送状态失败: %s", exc)
+            # Browser-driven registrations save the account first and run the
+            # protocol-based 2FA flow asynchronously. The first Space push is
+            # intentionally independent from this queue, so a 2FA failure can
+            # never turn a successful registration into a failed push.
+            if (
+                driver_mode not in ("protocol", "api", "http")
+                and bool(getattr(_twofa_cfg, "ENABLE_2FA", False))
+                and not str(result.get("totp_secret") or "").strip()
+            ):
+                try:
+                    from core import twofa_service
+                    account_id = result.get("account_id")
+                    if account_id is not None and str(account_id).strip().lstrip("-").isdigit():
+                        account = _db.get_account(int(account_id))
+                    else:
+                        account = _db.get_account_by_email(str(result.get("email") or "").strip())
+                    account_id = int((account or {}).get("id") or 0)
+                    if account_id:
+                        queued = twofa_service.enqueue_account_totp_setup(
+                            account_id=account_id,
+                            email=str(result.get("email") or (account or {}).get("email") or ""),
+                            access_token=str(result.get("access_token") or ""),
+                            trigger="post_registration",
+                            proxy=str((account or {}).get("proxy_used") or "") or None,
+                        )
+                        result["twofa_setup"] = {k: v for k, v in queued.items() if k != "future"}
+                except Exception as exc:
+                    # The account and its first Space push are already valid;
+                    # expose the queue problem without changing registration.
+                    result["twofa_setup"] = {
+                        "accepted": False,
+                        "busy": False,
+                        "error": f"{type(exc).__name__}: {str(exc)[:180]}",
+                    }
+                    logger.warning("[2FA] 注册后自动入队失败：%s", result["twofa_setup"]["error"])
+        return result
+
     driver_mode = str(getattr(_roxy_cfg, "REGISTRATION_DRIVER", "protocol") or "protocol").strip().lower()
     if driver_mode in ("roxy", "roxybrowser", "fingerprint", "browser"):
         from core.roxy_registration import run_roxy_registration
-        return run_roxy_registration(
+        return finish(run_roxy_registration(
             email=email,
             name=name,
             birthday=birthday or generate_random_birthday(),
@@ -195,10 +258,10 @@ def run_registration(
             otp_code=otp_code,
             batch_dir=batch_dir,
             on_email_acquired=on_email_acquired,
-        )
+        ))
     if driver_mode in ("cloak", "cloakbrowser"):
         from core.cloakbrowser_registration import run_cloak_registration
-        return run_cloak_registration(
+        return finish(run_cloak_registration(
             email=email,
             name=name,
             birthday=birthday or generate_random_birthday(),
@@ -206,10 +269,10 @@ def run_registration(
             otp_code=otp_code,
             batch_dir=batch_dir,
             on_email_acquired=on_email_acquired,
-        )
+        ))
     if driver_mode in ("browser_use", "browseruse", "browser-use", "bu"):
         from core.browser_use_registration import run_browser_use_registration
-        return run_browser_use_registration(
+        return finish(run_browser_use_registration(
             email=email,
             name=name,
             birthday=birthday or generate_random_birthday(),
@@ -217,10 +280,10 @@ def run_registration(
             otp_code=otp_code,
             batch_dir=batch_dir,
             on_email_acquired=on_email_acquired,
-        )
+        ))
     if driver_mode in ("skyvern", "sv"):
         from core.skyvern_registration import run_skyvern_registration
-        return run_skyvern_registration(
+        return finish(run_skyvern_registration(
             email=email,
             name=name,
             birthday=birthday or generate_random_birthday(),
@@ -228,7 +291,7 @@ def run_registration(
             otp_code=otp_code,
             batch_dir=batch_dir,
             on_email_acquired=on_email_acquired,
-        )
+        ))
     if driver_mode not in ("protocol", "api", "http"):
         raise RuntimeError(
             f"不支持的 REGISTRATION_DRIVER={driver_mode!r}，可选 protocol / roxy / cloak / browser_use / skyvern"
@@ -501,6 +564,7 @@ def run_registration(
             email=email,
             access_token=access_token,
             totp_secret=totp_secret,
+            chatgpt_session=session_info,
             email_source=resolve_email_source(email),
             proxy_used=session.proxy or None,
             batch_dir=batch_dir,
@@ -552,10 +616,11 @@ def run_registration(
             task_error = f"Codex 未完成: {codex_result.get('message', '未知')}"
             logger.warning(f"[任务结果] {email} 账号已保存但任务标失败，原因: {task_error}")
 
-        return {"success": task_success, "email": email, "account_id": account_id,
-                "access_token": access_token, "totp_secret": totp_secret,
-                "flow": flow_result, "codex": codex_result,
-                "error": task_error}
+        result = {"success": task_success, "email": email, "account_id": account_id,
+                 "access_token": access_token, "totp_secret": totp_secret,
+                 "flow": flow_result, "codex": codex_result,
+                 "error": task_error}
+        return finish(result)
 
     except Exception as e:
         logger.error(f"[失败] {email}: {type(e).__name__}: {e}")

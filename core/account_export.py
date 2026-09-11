@@ -456,6 +456,7 @@ def save_account_data(
     proxy_used: str | None = None,
     batch_dir: Path | None = None,
     auto_plan_check: bool | None = None,
+    chatgpt_session: dict | None = None,
 ) -> int:
     """
     将账号信息保存到 SQLite；output_path 仅为兼容旧调用方保留。
@@ -463,6 +464,11 @@ def save_account_data(
     """
     from core.db import insert_account
     extra = dict(extra or {})
+    # Preserve the complete /api/auth/session response as a sensitive account
+    # credential. List APIs expose only a presence flag; the raw value is read
+    # through the authenticated secret endpoint when explicitly requested.
+    if isinstance(chatgpt_session, dict) and chatgpt_session:
+        extra["chatgpt_session"] = chatgpt_session
     # Remail 的 service token 只存在进程内上下文中。注册成功后把订单上下文
     # 一并保存到账号 extra_json，服务重启时查活即可恢复，不再依赖“同一进程
     # 中先领取邮箱”。普通账号列表不会返回 extra_json。

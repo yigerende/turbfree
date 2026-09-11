@@ -4,6 +4,7 @@
 
 邮箱池导入格式：
     email----code_url
+    email----password----code_url
 
 注册时领取 email；取码时直接 GET code_url，并从响应中提取 6 位验证码。
 响应可以是纯文本、HTML 或 JSON，只要其中包含 6 位验证码即可。
@@ -165,9 +166,9 @@ def _extract_yangyang_openai_code(subject: str, body: str) -> str | None:
 
     lower = clean.lower()
     patterns = (
-        r"(?:code is|code:|verification code is|login code is|your code is)\D{0,80}(\d{6})",
-        r"(?:验证码|驗證碼|登录代码|登入代碼|確認コード|認証コード|ログインコード)\D{0,80}(\d{6})",
-        r"(\d{6})\D{0,80}(?:code|验证码|驗證碼|確認コード|認証コード)",
+        r"(?:code is|code:|verification code is|login code is|your code is|verification code|login code)\D{0,80}(\d{6})",
+        r"(?:验证码|驗證碼|登录代码|登入代碼|確認コード|認証コード|ログインコード|Bestätigungscode|Verifizierungscode|Sicherheitscode)\D{0,80}(\d{6})",
+        r"(\d{6})\D{0,80}(?:code|验证码|驗證碼|確認コード|認証コード|Bestätigungscode|Verifizierungscode)",
     )
     for pat in patterns:
         matches = re.findall(pat, clean, flags=re.IGNORECASE)
@@ -180,6 +181,29 @@ def _extract_yangyang_openai_code(subject: str, body: str) -> str | None:
         return candidates[-1]
 
     return _extract_code(clean)
+
+
+def _message_value(item: dict, *names: str):
+    """从不同邮件 API 的字段命名中取第一个非空值，支持简单嵌套字段。"""
+    for name in names:
+        value = item
+        for part in name.split("."):
+            if not isinstance(value, dict):
+                value = None
+                break
+            value = value.get(part)
+        if value not in (None, "", [], {}):
+            return value
+    return None
+
+
+def _message_text(value) -> str:
+    """把字符串、HTML、JSON 正文统一为可提取验证码的文本。"""
+    if value is None:
+        return ""
+    if isinstance(value, (dict, list)):
+        return _flatten_json(value)
+    return str(value)
 
 
 def _parse_yangyang_code_url(code_url: str) -> tuple[str, str, str] | None:
@@ -207,6 +231,18 @@ def _parse_yangyang_ts(value: str | None) -> float | None:
     if not value:
         return None
     raw = str(value).strip()
+    # 新版 msg.linlanyu 返回 ISO8601 UTC（例如 2026-09-06T00:55:14.000Z）。
+    # 不能把带 Z 的时间当作本地时间解析，否则中国时区会平白少 8 小时，
+    # after_ts 过滤会把刚收到的验证码误判成旧邮件。
+    try:
+        iso = raw
+        if iso.endswith("Z"):
+            iso = iso[:-1] + "+00:00"
+        dt = datetime.fromisoformat(iso)
+        if dt.tzinfo is not None:
+            return dt.timestamp()
+    except Exception:
+        pass
     for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%dT%H:%M:%S", "%Y-%m-%d %H:%M"):
         try:
             return datetime.strptime(raw[:19], fmt).timestamp()
@@ -330,24 +366,63 @@ def _fetch_yangyang_otp(
 
     items: list[dict] = []
     cursor: str | None = None
+    # msg.linlanyu.com 当前接口使用查询参数格式：
+    #   /api/messages?email=<email>&token=<token>&limit=1
+    # 旧版 yangyang 接口则使用路径格式 /api/messages/<token>/<email>。
+    # 先尝试旧路径，遇到 404 再回退到查询参数格式。
+    query_api_url = f"{origin}/api/messages"
+    query_api_supported = False
     # 一般第一页足够；保守支持最多翻 5 页。
     for _ in range(5):
         url = api_url if not cursor else f"{api_url}?cursor={quote(str(cursor), safe='')}"
         resp = session.get(url, headers={**headers, "Accept": "application/json"}, timeout=20, verify=False)
         if resp.status_code != 200:
             if resp.status_code == 404:
+                if not query_api_supported:
+                    try:
+                        query_resp = session.get(
+                            query_api_url,
+                            params={"email": email, "token": token, "limit": 20},
+                            headers={**headers, "Accept": "application/json"},
+                            timeout=20,
+                            verify=False,
+                        )
+                    except Exception as exc:
+                        logger.debug("[GenericAPI] query 参数接口读取失败: %s: %s", type(exc).__name__, exc)
+                        query_resp = None
+                    if query_resp is not None and query_resp.status_code == 200:
+                        try:
+                            query_data = query_resp.json()
+                        except Exception:
+                            query_data = None
+                        if isinstance(query_data, dict):
+                            nested = query_data.get("data")
+                            if isinstance(nested, dict):
+                                query_items = nested.get("messages") or nested.get("items") or []
+                            else:
+                                query_items = query_data.get("messages") or query_data.get("items") or []
+                            if isinstance(query_items, list):
+                                items.extend([x for x in query_items if isinstance(x, dict)])
+                                query_api_supported = True
+                                break
                 # 兼容 mail.ai1998.xyz 这类同样是 /messages/{token}/{email}，
-                # 但没有 /api/messages，邮件直接内嵌在 HTML 页面中的实现。
-                return _fetch_inline_messages_page_otp(
-                    session=session,
-                    code_url=code_url,
-                    headers=headers,
-                    after_ts=after_ts,
-                )
+                # 但没有 JSON API，邮件直接内嵌在 HTML 页面中的实现。
+                if not query_api_supported:
+                    return _fetch_inline_messages_page_otp(
+                        session=session,
+                        code_url=code_url,
+                        headers=headers,
+                        after_ts=after_ts,
+                    )
             logger.debug(f"[GenericAPI] yangyang 邮件列表 HTTP {resp.status_code}: {resp.text[:160]}")
             return None
         data = resp.json()
-        page_items = data.get("items") or []
+        nested = data.get("data") if isinstance(data, dict) else None
+        page_items = (
+            (nested.get("messages") or nested.get("items") or [])
+            if isinstance(nested, dict)
+            else (data.get("messages") or data.get("items") or [])
+        )
         if isinstance(page_items, list):
             items.extend([x for x in page_items if isinstance(x, dict)])
         if not data.get("has_more") or not data.get("next_cursor"):
@@ -355,10 +430,17 @@ def _fetch_yangyang_otp(
         cursor = str(data.get("next_cursor"))
 
     # API 默认新邮件在前；再次按时间倒序，尽量取最新验证码。
-    items.sort(key=lambda x: _parse_yangyang_ts(x.get("received_at") or x.get("receivedAt")) or 0, reverse=True)
+    items.sort(
+        key=lambda x: _parse_generic_api_ts(_message_value(
+            x, "received_at", "receivedAt", "date", "created_at", "createdAt", "timestamp", "time"
+        )) or 0,
+        reverse=True,
+    )
     for item in items:
-        msg_ts_raw = item.get("received_at") or item.get("receivedAt")
-        msg_ts = _parse_yangyang_ts(msg_ts_raw)
+        msg_ts_raw = _message_value(
+            item, "received_at", "receivedAt", "date", "created_at", "createdAt", "timestamp", "time"
+        )
+        msg_ts = _parse_generic_api_ts(msg_ts_raw)
         if after_ts and msg_ts and msg_ts + 2 < after_ts:
             logger.debug(
                 "[GenericAPI] yangyang 跳过旧邮件: id=%s ts=%s after=%s subject=%r",
@@ -366,37 +448,52 @@ def _fetch_yangyang_otp(
                 item.get("subject") or "",
             )
             continue
-        msg_id = item.get("id")
-        if not msg_id:
-            continue
-        detail_url = f"{origin}/message/{quote(str(msg_id), safe='')}/{token_q}/{email_q}"
-        try:
-            detail_resp = session.get(detail_url, headers={**headers, "Accept": "application/json"}, timeout=20, verify=False)
-            if detail_resp.status_code != 200:
+        # 某些通用 API 不提供 id；这时仍可直接从列表项正文取码。
+        msg_id = item.get("id") or item.get("messageId") or item.get("message_id") or f"item-{items.index(item)}"
+        # 查询参数接口（msg.linlanyu.com）已经在列表响应中返回 body/html，
+        # 不需要再请求旧版 /message/{id}/{token}/{email} 详情地址。
+        item_body = _message_value(
+            item, "body", "html", "text", "content", "bodyText", "body_html", "html_body", "message"
+        )
+        if query_api_supported and item_body:
+            detail = item
+        else:
+            detail_url = f"{origin}/message/{quote(str(msg_id), safe='')}/{token_q}/{email_q}"
+            try:
+                detail_resp = session.get(detail_url, headers={**headers, "Accept": "application/json"}, timeout=20, verify=False)
+                if detail_resp.status_code != 200:
+                    continue
+                detail = detail_resp.json()
+                if isinstance(detail, dict) and isinstance(detail.get("data"), dict):
+                    detail = detail["data"]
+            except Exception as exc:
+                logger.debug(f"[GenericAPI] yangyang 邮件详情读取失败: {type(exc).__name__}: {exc}")
                 continue
-            detail = detail_resp.json()
-        except Exception as exc:
-            logger.debug(f"[GenericAPI] yangyang 邮件详情读取失败: {type(exc).__name__}: {exc}")
-            continue
 
-        raw_body = str(detail.get("body") or "")
+        raw_body = _message_text(_message_value(
+            detail, "body", "html", "text", "content", "bodyText", "body_html", "html_body", "message"
+        ))
         body = _decode_data_uri(raw_body)
-        subject = str(detail.get("subject") or item.get("subject") or "")
+        subject = _message_text(_message_value(detail, "subject", "title")) or _message_text(
+            _message_value(item, "subject", "title")
+        )
         text = "\n".join([
             subject,
-            str(detail.get("fromAddress") or item.get("from_address") or ""),
-            str(detail.get("receivedAt") or item.get("received_at") or ""),
+            _message_text(_message_value(detail, "fromAddress", "from", "sender", "fromEmail")) or _message_text(
+                _message_value(item, "from_address", "fromAddress", "from", "sender", "fromEmail")
+            ),
+            _message_text(_message_value(detail, "receivedAt", "received_at", "date", "createdAt", "created_at", "timestamp")) or _message_text(msg_ts_raw),
             body,
         ])
         code = _extract_yangyang_openai_code(subject, body)
         if code:
             logger.info(
                 f"[GenericAPI] yangyang 页面提取到 OTP={code}, "
-                f"mail_id={msg_id}, ts={detail.get('receivedAt') or item.get('received_at')}, subject={subject[:80]!r}"
+                f"mail_id={msg_id}, ts={_message_value(detail, 'receivedAt', 'received_at', 'date', 'createdAt', 'created_at', 'timestamp') or msg_ts_raw}, subject={subject[:80]!r}"
             )
             return code, {
                 "mail_id": msg_id,
-                "received_at": detail.get("receivedAt") or item.get("received_at"),
+                "received_at": _message_value(detail, "receivedAt", "received_at", "date", "createdAt", "created_at", "timestamp") or msg_ts_raw,
                 "subject": subject,
                 "msg_ts": msg_ts,
             }
@@ -498,7 +595,7 @@ def pick_account() -> GenericApiEmailAccount:
     if row is None:
         summary = generic_api_email_pool_summary()
         raise GenericApiMailError(
-            f"通用 API 邮箱池没有可用账号: {summary}. 请在 WebUI 邮箱池导入：邮箱----取码地址"
+            f"通用 API 邮箱池没有可用账号: {summary}. 请在 WebUI 邮箱池导入：邮箱----取码地址 或 邮箱----密码----取码地址"
         )
     account = GenericApiEmailAccount(email=row["email"], code_url=row["code_url"])
     _CONTEXT_CACHE[account.email] = account
@@ -507,7 +604,7 @@ def pick_account() -> GenericApiEmailAccount:
 
 
 def import_from_file(path: str | Path | None = None) -> tuple[int, int]:
-    """从文本文件导入通用 API 邮箱，每行：email----code_url 或 email====code_url。"""
+    """从文本导入通用 API 邮箱，支持 email----[password----]code_url。"""
     from core.db import import_generic_api_emails
     p = Path(path) if path else _ACCOUNTS_FILE
     if not p.is_absolute():
@@ -523,7 +620,10 @@ def import_from_file(path: str | Path | None = None) -> tuple[int, int]:
         parts = [x.strip() for x in parts]
         if len(parts) < 2:
             continue
-        records.append({"email": parts[0], "code_url": parts[1]})
+        if len(parts) >= 3 and not parts[1].lower().startswith(("http://", "https://")):
+            records.append({"email": parts[0], "password": parts[1], "code_url": parts[2]})
+        else:
+            records.append({"email": parts[0], "code_url": parts[1]})
     return import_generic_api_emails(records)
 
 

@@ -2258,6 +2258,7 @@
           <button type="button" class="jobs-tb-btn jobs-tb-btn--good" id="btnCopySelectedTokensV2" disabled title="复制选中账号的 Token，每个账号一行">复制Token</button>
           <button type="button" class="jobs-tb-btn jobs-tb-btn--good" id="btnCopySelectedEmailsV2" disabled title="复制选中账号的邮箱，每个账号一行">复制邮箱</button>
           <button type="button" class="jobs-tb-btn jobs-tb-btn--good" id="btnDownloadSelectedTxtV2" disabled title="把选中账号的完整整行保存为 TXT 文件，每个账号一行">下载TXT</button>
+          <button type="button" class="jobs-tb-btn jobs-tb-btn--primary" id="btnPushSelectedRemoteV2" disabled title="Space 没有则新增，已有则按邮箱更新邮箱资料、ChatGPT 密码、AT、Session、2FA 和 RT，不进入 Team 轮转">仅推送到 Space</button>
           <button type="button" class="jobs-tb-btn" id="btnArchiveSelectedAccountsV2" disabled title="归档选中的账号；默认账号列表将不再查询/显示这些账号">归档选中</button>
           <button type="button" class="jobs-tb-btn jobs-tb-btn--danger" id="btnDeleteSelectedAccountsV2" disabled title="删除选中的本地账号/token记录">删除</button>
         </div>
@@ -2498,7 +2499,7 @@
     <div class="outlook-import-head">
       <div class="outlook-import-head-main">
         <h3 id="outlookImportTitle">导入邮箱素材</h3>
-        <p>Outlook：邮箱----密码----clientId----refreshToken；通用 API：邮箱----取码地址；通用 IMAP 邮箱每行仅需“邮箱----IMAP密码”或“邮箱:IMAP密码”，服务器参数在下方统一配置。</p>
+        <p>Outlook：邮箱----密码----clientId----refreshToken；通用 API：邮箱----密码----取码地址（无密码也可用“邮箱----取码地址”）；通用 IMAP 邮箱每行仅需“邮箱----IMAP密码”或“邮箱:IMAP密码”，服务器参数在下方统一配置。</p>
       </div>
       <button type="button" class="outlook-import-close" id="btnCloseOutlookImport" aria-label="关闭">×</button>
     </div>
@@ -2537,7 +2538,7 @@
       </label>
       <label class="outlook-import-field">
         <span>邮箱素材</span>
-        <textarea id="importTextV2" placeholder="Outlook: email----password----clientId----refreshToken&#10;通用API: email----取码地址"></textarea>
+        <textarea id="importTextV2" placeholder="Outlook: email----password----clientId----refreshToken&#10;通用API: email----password----取码地址（密码可省略）"></textarea>
       </label>
     </div>
     <div class="outlook-import-foot">
@@ -3521,6 +3522,12 @@ function _codexAction(r) {
 }
 function _tokenCellV2(r) {
   const live = r.live_check_status || '';
+  const push = r.remote_import_status || '';
+  const pushText = push === 'success' ? '推送: 成功' : push === 'failed' ? '推送: 失败' : push === 'skipped' ? '推送: 跳过' : '推送: 未推送';
+  const pushHtml = `<div class="acc-v2-sub" title="${esc(r.remote_import_message || r.remote_import_at || '')}" style="color:${push === 'success' ? '#67c23a' : push === 'failed' ? '#f56c6c' : '#909399'}">${pushText}</div>`;
+  const sessionHtml = r.has_chatgpt_session
+    ? `<button type="button" class="acc-v2-token-copy" data-account-copy-secret="chatgpt_session" data-account-id="${esc(r.id)}" title="复制完整 /api/auth/session JSON">复制Session</button>`
+    : `<div class="acc-v2-sub" style="color:#909399">Session: 未保存</div>`;
   const liveErr = r.live_check_error || '';
   const liveAt = r.live_checked_at || '';
   let liveHtml = '';
@@ -3531,9 +3538,9 @@ function _tokenCellV2(r) {
   else if (live === 'deactivated') liveHtml = `<div class="acc-v2-sub" title="${esc(liveErr || liveAt)}" style="color:#f56c6c">查活: 已废</div>`;
   else if (live === 'failed') liveHtml = `<div class="acc-v2-sub" title="${esc(liveErr || liveAt)}" style="color:#e6a23c">查活: 失败</div>`;
   if (r.has_access_token) {
-    return `<button type="button" class="acc-v2-token-copy" data-account-copy-secret="access_token" data-account-id="${esc(r.id)}" title="复制完整 Token">复制</button>${liveHtml}`;
+    return `<button type="button" class="acc-v2-token-copy" data-account-copy-secret="access_token" data-account-id="${esc(r.id)}" title="复制完整 Token">复制AT</button>${sessionHtml}${liveHtml}${pushHtml}`;
   }
-  return `<span class="pill status-failed">无Token</span>${liveHtml}`;
+  return `<span class="pill status-failed">无Token</span>${liveHtml}${pushHtml}`;
 }
 function _accountsV2MoreMenu(r) {
   const parts = [
@@ -3622,6 +3629,7 @@ function updateAccountSelectionUi(pageRows = null) {
     'btnRetrySelectedCodexV2', 'btnDownloadSelectedCpaV2', 'btnStopSelectedCodexV2',
     'btnSetupSelectedTotpV2', 'btnNoteSelectedAccountsV2', 'btnCopySelectedLinesV2', 'btnCopySelectedTokensV2', 'btnCopySelectedEmailsV2',
     'btnDownloadSelectedTxtV2', 'btnArchiveSelectedAccountsV2', 'btnDeleteSelectedAccountsV2',
+    'btnPushSelectedRemoteV2',
   ];
   v2Ids.forEach(id => {
     const el = document.getElementById(id);
@@ -3771,6 +3779,7 @@ async function onAccountsBodyClick(e) {
       copyText(value);
       showToast(
         field === 'access_token' ? 'Token 已复制' :
+        field === 'chatgpt_session' ? '完整 Session 已复制' :
         field === 'codex_agent_token' ? 'Agent Token 已复制' :
         field === 'totp_secret' ? '2FA 密钥已复制' :
         field === 'totp_code' ? `验证码已复制：${value}` :
@@ -4932,6 +4941,16 @@ async function copyCurrentPageLines() {
   if (!ids.length) { showToast('当前页没有账号'); return; }
   try { copyText((await fetchAccountSecrets(ids, 'copy_line')).join('\n')); } catch(e) { showToast('复制失败: ' + e.message); }
 }
+async function pushSelectedRemote() {
+  const ids = Array.from(ACCOUNT_SELECTED).map(Number);
+  if (!ids.length) { showToast('请先选择账号'); return; }
+  if (!confirm(`确定仅推送选中的 ${ids.length} 个账号到 Space Merge？\n没有则新增，已有则按邮箱更新密码、AT、Session、2FA、RT 和邮箱资料，不会进入 Team 轮转。`)) return;
+  try {
+    const d = await api('/api/accounts/push-remote', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({account_ids: ids})});
+    if (d.ok === false && (d.failed || 0) > 0) throw new Error(d.error || `成功 ${d.success||0}，失败 ${d.failed||0}`);
+    showToast(`推送完成：成功 ${d.success||0}，跳过 ${d.skipped||0}，失败 ${d.failed||0}`);
+  } catch (e) { showToast('推送失败：' + e.message); }
+}
 (function bindAccountsToolbarV2() {
   const bind = (id, fn) => {
     const el = document.getElementById(id);
@@ -4950,6 +4969,7 @@ async function copyCurrentPageLines() {
   bind('btnCopyAllTokensV2', copyCurrentPageTokens);
   bind('btnCopyAllLinesV2', copyCurrentPageLines);
   bind('btnDownloadSelectedTxtV2', downloadSelectedAccountTxt);
+  bind('btnPushSelectedRemoteV2', pushSelectedRemote);
   bind('btnArchiveSelectedAccountsV2', archiveSelectedAccounts);
   bind('btnDeleteSelectedAccountsV2', deleteSelectedAccounts);
 })();
@@ -5241,7 +5261,7 @@ function setImportSourceV2(val) {
   if (text) text.placeholder = next === 'imap'
     ? 'user@example.com----imapPassword\nuser2@example.com:imapPassword'
     : next === 'generic_api'
-      ? 'email----取码地址'
+      ? 'email----password----取码地址\n或：email----取码地址'
       : 'email----password----clientId----refreshToken';
 }
 function openOutlookImportModal() {
@@ -6114,8 +6134,9 @@ function renderConfigPlainFieldV2(f) {
       ${control}
     </label>
   `;
-  const decorated = f.external_url
-    ? `<div class="config-field-wrap">${field}${renderConfigExternalLink(f)}</div>`
+  const testButton = f.key === 'REMOTE_IMPORT_URL' ? `<button type="button" class="jobs-tb-btn" data-remote-import-test style="margin-top:8px">测试连接</button><span data-remote-import-test-status class="hint"></span>` : '';
+  const decorated = (f.external_url || testButton)
+    ? `<div class="config-field-wrap">${field}${testButton}${renderConfigExternalLink(f)}</div>`
     : field;
   return decorated + renderConfigRecommendedLinks(f);
 }
@@ -6476,15 +6497,17 @@ function setActiveConfigNav(slug) {
 }
 function bindConfigLayoutV2() {
   const nav = document.getElementById('configNavV2');
-  if (!nav || nav.dataset.bound) return;
-  nav.dataset.bound = '1';
-  nav.addEventListener('click', (e) => {
+  if (!nav) return;
+  if (!nav.dataset.bound) {
+    nav.dataset.bound = '1';
+    nav.addEventListener('click', (e) => {
     const btn = e.target.closest('[data-config-nav]');
     if (!btn) return;
     const slug = btn.dataset.configTarget;
     setActiveConfigNav(slug);
     scrollToConfigSection(slug);
-  });
+    });
+  }
   const layout = document.getElementById('configLayoutV2');
   if (layout && !layout.dataset.epBound) {
     layout.dataset.epBound = '1';
@@ -6551,6 +6574,18 @@ function bindConfigLayoutV2() {
     const mo = new MutationObserver(watch);
     mo.observe(sectionRoot, { childList: true });
   }
+  document.querySelectorAll('[data-remote-import-test]').forEach(btn => {
+    if (btn.dataset.bound) return;
+    btn.dataset.bound = '1';
+    btn.addEventListener('click', async () => {
+    const input = document.querySelector('input[data-key="REMOTE_IMPORT_URL"]');
+    const status = document.querySelector('[data-remote-import-test-status]');
+    btn.disabled = true; if (status) status.textContent = '正在测试...';
+    try { const r = await api('/api/config/remote-import-test', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({url: input?.value || ''})}); if (status) status.textContent = ' ✅ ' + (r.message || '连接成功'); }
+    catch(e) { if (status) status.textContent = ' ❌ ' + e.message; }
+    finally { btn.disabled = false; }
+    });
+  });
 }
 
 async function loadConfig() {

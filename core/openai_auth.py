@@ -254,9 +254,19 @@ def request_sentinel_token(session: BrowserSession, flow: str) -> dict:
 
     headers = session.get_sentinel_headers()
 
-    logger.info(f"[Sentinel] 请求 sentinel token, flow={flow}")
-    resp = session.post(url, headers=headers, data=body)
-    resp.raise_for_status()
+    logger.info(f"[Sentinel] 请求 sentinel token, flow={flow}, proxy={session._short_value(getattr(session, 'proxy', '') or 'direct', 96)}")
+    last_exc = None
+    for attempt in range(1, 4):
+        try:
+            resp = session.post(url, headers=headers, data=body)
+            resp.raise_for_status()
+            break
+        except Exception as exc:
+            last_exc = exc
+            if attempt >= 3:
+                raise
+            logger.warning(f"[Sentinel] 请求失败，第 {attempt}/3 次：{type(exc).__name__}: {str(exc)[:160]}，稍后重试")
+            time.sleep(1.5 * attempt)
 
     data = resp.json()
     logger.info(f"[Sentinel] 获取 sentinel token 成功, persona={data.get('persona')}")
@@ -524,12 +534,21 @@ def create_account(session: BrowserSession, name: str, birthday: str, sentinel_h
     })
 
     logger.info(f"[步骤12] 提交用户信息, 名称: {name}, 生日: {birthday}")
-    resp = session.post(url, headers=headers, data=body)
-
-    if resp.status_code != 200:
-        logger.error(f"[步骤12] 请求失败, 状态码: {resp.status_code}")
-        logger.error(f"[步骤12] 响应内容: {resp.text}")
-        resp.raise_for_status()
+    resp = None
+    for attempt in range(1, 4):
+        try:
+            resp = session.post(url, headers=headers, data=body)
+            if resp.status_code == 200:
+                break
+            if resp.status_code < 500 or attempt >= 3:
+                logger.error(f"[步骤12] 请求失败, 状态码: {resp.status_code}")
+                logger.error(f"[步骤12] 响应内容: {resp.text[:300]}")
+                resp.raise_for_status()
+        except Exception as exc:
+            if attempt >= 3:
+                raise
+            logger.warning(f"[步骤12] 请求异常，第 {attempt}/3 次：{type(exc).__name__}: {str(exc)[:160]}，稍后重试")
+        time.sleep(1.5 * attempt)
 
     data = resp.json()
     logger.info("[步骤12] 创建接口返回成功，等待 OAuth 回调建立登录态")

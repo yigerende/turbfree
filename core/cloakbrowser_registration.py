@@ -135,7 +135,7 @@ def run_cloak_registration(
         logger.info("[Cloak注册] 已拿到 accessToken：%s", email)
 
         if _twofa_cfg.ENABLE_2FA:
-            logger.warning("[Cloak注册] 当前 CloakBrowser 自动化路径暂不执行 2FA 设置，已跳过")
+            logger.info("[Cloak注册] 账号保存并首次推送后，将由统一后台队列设置 2FA")
         totp_secret = None
 
         codex_result = {
@@ -172,6 +172,7 @@ def run_cloak_registration(
             email=email,
             access_token=access_token,
             totp_secret=totp_secret,
+            chatgpt_session=session_info,
             email_source=resolve_email_source(email),
             proxy_used=((opened.raw or {}).get("proxy") if opened else None) or proxy or None,
             batch_dir=batch_dir,

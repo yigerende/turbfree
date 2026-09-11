@@ -558,10 +558,12 @@ def _outlook_line(row: dict) -> str:
 
 
 def _generic_api_email_line(row: dict) -> str:
-    return "----".join([
-        row.get("email") or "",
-        row.get("code_url") or "",
-    ])
+    parts = [row.get("email") or ""]
+    password = row.get("password") or row.get("mail_password") or ""
+    if password:
+        parts.append(password)
+    parts.append(row.get("code_url") or "")
+    return "----".join(parts)
 
 
 def _imap_email_line(row: dict) -> str:
@@ -1665,6 +1667,20 @@ def get_account_by_email(email: str) -> dict | None:
         row = _find_by_email(_load_accounts(), email)
         return _decorate_account(row) if row else None
 
+def update_account_remote_import(acc_id: int, result: dict | None = None) -> bool:
+    result = result or {}
+    with _LOCK:
+        rows = _load_accounts()
+        row = next((r for r in rows if int(r.get("id") or 0) == int(acc_id)), None)
+        if row is None:
+            return False
+        row["remote_import_status"] = str(result.get("status") or "").strip()
+        row["remote_import_message"] = str(result.get("message") or "").strip()[:240]
+        row["remote_import_at"] = _now()
+        row["updated_at"] = row["remote_import_at"]
+        _save_accounts(rows)
+        return True
+
 
 def update_account_note(acc_id: int, note: str) -> bool:
     """更新单个已注册账号备注。note 为空字符串时表示清空备注。"""
@@ -1704,6 +1720,19 @@ def update_account_liveness(acc_id: int, result: dict | None = None) -> bool:
             if token:
                 row["access_token"] = token
             session = result.get("session") or {}
+            if isinstance(session, dict) and session:
+                extra_raw = row.get("extra_json")
+                if isinstance(extra_raw, str) and extra_raw.strip():
+                    try:
+                        extra = json.loads(extra_raw)
+                    except Exception:
+                        extra = {}
+                elif isinstance(extra_raw, dict):
+                    extra = dict(extra_raw)
+                else:
+                    extra = {}
+                extra["chatgpt_session"] = session
+                row["extra_json"] = json.dumps(extra, ensure_ascii=False)
             user = session.get("user") or {}
             account = session.get("account") or {}
             if user.get("id"):
@@ -2067,7 +2096,7 @@ def import_registered_email_accounts(records: list[dict], source: str | None) ->
 
     source:
       - outlook: records 元素 {email,password,client_id,refresh_token[,access_token,totp_secret]}
-      - generic_api: records 元素 {email,code_url[,access_token,totp_secret]}
+      - generic_api: records 元素 {email,code_url[,password,access_token,totp_secret]}
       - imap: records 元素 {email,imap_password,imap_server,imap_port,imap_ssl}
 
     返回 (新增账号数, 跳过数)。已存在账号会跳过；邮箱池中已存在的素材会复用并标记 used。
@@ -2129,6 +2158,7 @@ def import_registered_email_accounts(records: list[dict], source: str | None) ->
                 original_line = _imap_email_line(pool_row)
             elif source == "generic_api":
                 code_url = (raw.get("code_url") or raw.get("url") or "").strip()
+                password = (raw.get("password") or raw.get("mail_password") or "").strip()
                 if not code_url:
                     skipped += 1
                     continue
@@ -2137,6 +2167,7 @@ def import_registered_email_accounts(records: list[dict], source: str | None) ->
                     pool_row = {
                         "id": _next_id(generic_rows),
                         "email": email,
+                        "password": password,
                         "code_url": code_url,
                         "status": "used",
                         "used_at": now,
@@ -2145,6 +2176,7 @@ def import_registered_email_accounts(records: list[dict], source: str | None) ->
                     }
                     generic_rows.append(pool_row)
                 else:
+                    pool_row["password"] = password or pool_row.get("password")
                     pool_row["code_url"] = code_url or pool_row.get("code_url")
                 pool_row["status"] = "used"
                 pool_row["used_at"] = pool_row.get("used_at") or now
@@ -2342,7 +2374,7 @@ def get_outlook_by_email(email: str) -> dict | None:
 def import_generic_api_emails(records: list[dict]) -> tuple[int, int]:
     """
     批量导入通用 API 取码邮箱。
-    records 元素：{email, code_url}
+    records 元素：{email, code_url[, password]}
     返回 (新增数, 跳过数)。
     """
     with _LOCK:
@@ -2350,6 +2382,7 @@ def import_generic_api_emails(records: list[dict]) -> tuple[int, int]:
         inserted = skipped = 0
         for raw in records:
             email = (raw.get("email") or "").strip()
+            password = (raw.get("password") or raw.get("mail_password") or "").strip()
             code_url = (raw.get("code_url") or raw.get("url") or "").strip()
             if not email or not code_url:
                 skipped += 1
@@ -2360,6 +2393,7 @@ def import_generic_api_emails(records: list[dict]) -> tuple[int, int]:
             row = {
                 "id": _next_id(rows),
                 "email": email,
+                "password": password,
                 "code_url": code_url,
                 "status": "available",
                 "used_at": None,

@@ -2815,7 +2815,7 @@ def run_browser_use_registration(
             logger.info("[BrowserUse] 已拿到 accessToken：%s", email)
 
             if _twofa_cfg.ENABLE_2FA:
-                logger.warning("[BrowserUse] 当前路径暂不自动设置 2FA，已跳过")
+                logger.info("[BrowserUse] 账号保存并首次推送后，将由统一后台队列设置 2FA")
             totp_secret = None
 
             codex_result = {
@@ -2862,6 +2862,7 @@ def run_browser_use_registration(
                 email=email,
                 access_token=access_token,
                 totp_secret=totp_secret,
+                chatgpt_session=session_info,
                 email_source=resolve_email_source(email),
                 proxy_used=proxy or f"{provider_prefix}:{session_info_open.proxy_country_code or 'default'}",
                 batch_dir=batch_dir,

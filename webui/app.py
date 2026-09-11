@@ -24,6 +24,7 @@ import pyotp
 from core import codex_retry_service, db, plan_check_service, extract_link_service, codex_agent_service, live_check_service
 from webui.auth import init_auth, register_auth_routes
 from core import registration_service as svc
+from core import remote_import
 from webui import config_editor
 
 logger = logging.getLogger(__name__)
@@ -103,6 +104,10 @@ def _compact_account_for_list(row: dict) -> dict:
             extra = {}
     elif isinstance(extra_raw, dict):
         extra = extra_raw
+    out["has_chatgpt_session"] = bool(
+        isinstance(extra.get("chatgpt_session"), dict)
+        and extra.get("chatgpt_session")
+    )
     password = str(
         extra.get("registration_password")
         or row.get("registration_password")
@@ -141,6 +146,8 @@ def _compact_account_for_list(row: dict) -> dict:
         # Codex / Agent 状态提示。
         "codex_error", "codex_agent_message", "codex_agent_runtime_id",
         "codex_agent_sub2api_url", "codex_agent_sub2api_mode", "codex_agent_sub2api_total",
+        # Space Merge 推送状态。
+        "remote_import_status", "remote_import_message", "remote_import_at",
         "totp_setup_error", "totp_setup_message", "totp_setup_started_at", "totp_setup_completed_at",
     )
     for key in optional_keys:
@@ -184,7 +191,21 @@ def _account_secret_value(row: dict, field: str) -> str:
         elif isinstance(extra_raw, dict):
             extra = extra_raw
         return str(extra.get("registration_password") or row.get("registration_password") or "未设置")
-    raise ValueError("field 仅支持 access_token/copy_line/codex_agent_token/totp_secret/totp_code/password")
+    if field == "chatgpt_session":
+        extra_raw = row.get("extra_json")
+        extra = {}
+        if isinstance(extra_raw, str) and extra_raw.strip():
+            try:
+                extra = json.loads(extra_raw)
+            except Exception:
+                extra = {}
+        elif isinstance(extra_raw, dict):
+            extra = extra_raw
+        session_data = extra.get("chatgpt_session")
+        if not isinstance(session_data, dict) or not session_data:
+            return ""
+        return json.dumps(session_data, ensure_ascii=False, indent=2)
+    raise ValueError("field 仅支持 access_token/copy_line/codex_agent_token/totp_secret/totp_code/password/chatgpt_session")
 
 
 def _compact_job_for_list(row: dict) -> dict:
@@ -486,6 +507,52 @@ def create_app(auth_code: str | None = None) -> Flask:
             else:
                 skipped.append({"id": acc_id, "email": acc.get("email"), "reason": "值为空"})
         return jsonify({"ok": True, "field": field, "values": values, "count": len(values), "skipped": skipped})
+
+    @app.post("/api/accounts/push-remote")
+    def api_accounts_push_remote():
+        """把选中的已注册账号推送到 Space Merge；敏感值只在服务端读取。"""
+        data = request.get_json(silent=True) or {}
+        ids = data.get("account_ids") or data.get("ids") or []
+        if not isinstance(ids, list) or not ids:
+            return jsonify({"ok": False, "error": "account_ids 必须是非空数组"}), 400
+        if len(ids) > 5000:
+            return jsonify({"ok": False, "error": "单次最多推送 5000 个账号"}), 400
+        items, seen = [], set()
+        for raw in ids:
+            try:
+                acc_id = int(raw)
+            except (TypeError, ValueError):
+                items.append({"id": raw, "status": "skipped", "message": "ID 非法"})
+                continue
+            if acc_id in seen:
+                continue
+            seen.add(acc_id)
+            acc = db.get_account(acc_id)
+            if not acc:
+                items.append({"id": acc_id, "status": "skipped", "message": "账号不存在"})
+                continue
+            result = remote_import.push_account(acc, force=True)
+            db.update_account_remote_import(acc_id, result)
+            items.append({"id": acc_id, "email": acc.get("email"), **result})
+        success = sum(1 for x in items if x.get("status") == "success")
+        failed = sum(1 for x in items if x.get("status") == "failed")
+        skipped = len(items) - success - failed
+        return jsonify({"ok": failed == 0, "total": len(items), "success": success, "failed": failed, "skipped": skipped, "items": items})
+
+    @app.post("/api/config/remote-import-test")
+    def api_remote_import_test():
+        data = request.get_json(silent=True) or {}
+        from core.remote_import import remote_import_url
+        url = remote_import_url(data.get("url"))
+        if not url:
+            return jsonify({"ok": False, "error": "请填写 IP:端口或域名"}), 400
+        try:
+            import requests as _requests
+            base = url.rsplit('/api/integrations/turb/register', 1)[0]
+            resp = _requests.get(base + '/health/ready', timeout=8)
+            return jsonify({"ok": resp.ok, "status": resp.status_code, "url": base, "message": "连接成功" if resp.ok else "服务返回异常"})
+        except Exception as exc:
+            return jsonify({"ok": False, "url": url, "error": f"连接失败：{type(exc).__name__}: {str(exc)[:160]}"}), 502
 
     @app.post("/api/accounts/<int:acc_id>/archive")
     def api_account_archive(acc_id: int):
@@ -1547,7 +1614,7 @@ def create_app(auth_code: str | None = None) -> Flask:
         """
         粘贴文本导入邮箱素材。
         Outlook：email----password----clientId----refreshToken
-        通用 API：email----code_url
+        通用 API：email----code_url 或 email----password----code_url
         通用 IMAP：email----password 或 email:password；服务器/端口/SSL 单独传入
         分隔符兼容 ---- 与 ====。
         """
@@ -1586,11 +1653,26 @@ def create_app(auth_code: str | None = None) -> Flask:
             if source == "generic_api":
                 if len(parts) < 2:
                     continue
+                # 兼容旧的两段格式，同时支持带邮箱密码的三段格式。
+                # 历史上未公开的 email----code_url----AT----TOTP 仍按 URL
+                # 位于第二段来识别，避免升级后错位。
+                second_is_url = parts[1].lower().startswith(("http://", "https://"))
+                if len(parts) >= 3 and not second_is_url:
+                    mail_password = parts[1]
+                    code_url = parts[2]
+                    access_token = parts[3] if len(parts) > 3 else ""
+                    totp_secret = parts[4] if len(parts) > 4 else ""
+                else:
+                    mail_password = ""
+                    code_url = parts[1]
+                    access_token = parts[2] if len(parts) > 2 else ""
+                    totp_secret = parts[3] if len(parts) > 3 else ""
                 records.append({
                     "email": parts[0],
-                    "code_url": parts[1],
-                    "access_token": parts[2] if len(parts) > 2 else "",
-                    "totp_secret": parts[3] if len(parts) > 3 else "",
+                    "password": mail_password,
+                    "code_url": code_url,
+                    "access_token": access_token,
+                    "totp_secret": totp_secret,
                 })
                 continue
             if source == "imap":
@@ -1613,7 +1695,7 @@ def create_app(auth_code: str | None = None) -> Flask:
                 "totp_secret": parts[5] if len(parts) > 5 else "",
             })
         if not records:
-            need = ("2 段：邮箱----取码地址" if source == "generic_api" else
+            need = ("邮箱----取码地址 或 邮箱----密码----取码地址" if source == "generic_api" else
                     "邮箱----IMAP密码 或 邮箱:IMAP密码" if source == "imap" else
                     "4 段：email----password----clientId----refreshToken")
             return jsonify({"ok": False, "error": f"未解析到有效邮箱行（需 {need}，---- 或 ==== 分隔）"}), 400

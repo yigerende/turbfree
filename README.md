@@ -47,7 +47,7 @@ ChatGPT / OpenAI 账号自动注册与 Codex OAuth 授权工具。当前项目�
 - Outlook 邮箱池：`email----password----clientId----refreshToken`
 - Cloudflare 域名邮箱 + QQ 邮箱 IMAP 收信（`cloudflare_domain`）
 - Cloudflare Worker 临时邮箱：自动创建 + JWT 取码（`cloudflare`，兼容 cloudflare_temp_email）
-- 通用 API 邮箱：`email----取码地址`
+- 通用 API 邮箱：`email----password----取码地址`（无密码时也兼容 `email----取码地址`）
 - 通用 IMAP 邮箱池：每行 `邮箱----IMAP密码` 或 `邮箱:IMAP密码`，服务器、端口和 SSL 在导入界面统一配置
 - GPTMail 临时邮箱 API：运行时随机生成邮箱并自动收取验证码
 - Remail 开放 API：按项目下单短效邮箱并自动收取验证码（`remail`）
@@ -209,6 +209,19 @@ cp .env.example .env
 
 WebUI 配置页保存这些字段时会写入 `.env`（不是 config 源码）。
 
+### 推送到 Space Console
+
+注册驱动完成真实浏览器注册并从 `https://chatgpt.com/api/auth/session` 取得 AT 后，可在配置页“Space Console 回调”开启自动导入。填写：
+
+```dotenv
+REMOTE_IMPORT_ENABLED=True
+REMOTE_IMPORT_URL=http://127.0.0.1:18120/api/integrations/turb/register
+REMOTE_IMPORT_USERNAME=admin
+REMOTE_IMPORT_PASSWORD=你的Space Console密码
+```
+
+回调使用 HTTP Basic Auth；推送失败会记录在注册结果的 `remote_import` 字段，不会伪装成本地注册失败。
+
 ---
 
 ## 快速开始
@@ -254,8 +267,10 @@ email----password----clientId----refreshToken
 每行格式：
 
 ```text
-email----code_url
+email----password----code_url
 ```
+
+没有邮箱密码时仍可使用旧格式：`email----code_url`。
 
 在 `config/email.py` 设置：
 

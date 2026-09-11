@@ -2288,7 +2288,7 @@ def run_roxy_registration(
         _check_manual_stop()
 
         if _twofa_cfg.ENABLE_2FA:
-            logger.warning("[Roxy注册] 当前 Roxy 自动化路径暂不执行 2FA 设置，已跳过")
+            logger.info("[Roxy注册] 账号保存并首次推送后，将由统一后台队列设置 2FA")
         totp_secret = None
 
         codex_result = {
@@ -2329,6 +2329,7 @@ def run_roxy_registration(
             email=email,
             access_token=access_token,
             totp_secret=totp_secret,
+            chatgpt_session=session_info,
             email_source=resolve_email_source(email),
             proxy_used=proxy or None,
             batch_dir=batch_dir,

@@ -55,6 +55,27 @@ EDITABLE_FIELDS = [
         "key": "AUTO_PLAN_CHECK_AFTER_REGISTER", "file": "register.py", "type": "bool", "group": "注册方式",
         "label": "注册后自动查套餐", "help": "注册成功后自动入队查询套餐/Plus 资格；关闭后仅保存账号，不自动查套餐",
     },
+    {
+        "key": "REMOTE_IMPORT_ENABLED", "file": "remote_import.py", "type": "bool", "group": "Space Merge 推送",
+        "label": "启用远程导入", "help": "注册成功拿到 AT 后，自动推送到 chatgpt-space-merge 的 Free 账号管理",
+    },
+    {
+        "key": "REMOTE_IMPORT_URL", "file": "remote_import.py", "type": "str", "group": "Space Merge 推送",
+        "label": "Space Merge 接口", "help": "例如 http://127.0.0.1:18120/api/integrations/turb/register",
+    },
+    {
+        "key": "REMOTE_IMPORT_USERNAME", "file": "remote_import.py", "type": "str", "group": "Space Merge 推送",
+        "label": "接口账号", "help": "Space Console 登录账号，默认 admin",
+    },
+    {
+        "key": "REMOTE_IMPORT_PASSWORD", "file": "remote_import.py", "type": "str", "group": "Space Merge 推送",
+        "label": "接口密码", "help": "Space Console 登录密码，默认 admin；建议登录后修改并同步更新此处",
+        "storage": "env", "secret": True,
+    },
+    {
+        "key": "REMOTE_IMPORT_TIMEOUT", "file": "remote_import.py", "type": "int", "group": "Space Merge 推送",
+        "label": "接口超时(秒)", "help": "远程导入请求超时时间",
+    },
 
     # ---- CloakBrowser ----
     {
@@ -519,7 +540,7 @@ EDITABLE_FIELDS = [
     # ---- 代理池 ----
     {
         "key": "PROXY_POOL", "file": "proxy.py", "type": "list_str_multiline", "group": "代理池",
-        "label": "代理池(每行一个)", "help": "每行一个代理 URL，留空行会被忽略；为空则不使用代理",
+        "label": "代理池(每行一个)", "help": "支持标准 URL，也支持 host:端口:用户名:密码（保存后自动转换）；每行一个，留空行会被忽略",
         "recommended_links": [
             {
                 "label": "IPRocket 家宽",

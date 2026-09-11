@@ -7,6 +7,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from core import db
+from webui.app import create_app
 
 
 class EmailPoolSourceTests(unittest.TestCase):
@@ -43,6 +44,52 @@ class EmailPoolSourceTests(unittest.TestCase):
                 generic_items = db.list_email_pool_page(source="generic_api", limit=10)["items"]
                 self.assertEqual(all_items[0]["source"], "generic_api")
                 self.assertEqual(generic_items[0]["source"], "generic_api")
+
+    def test_generic_api_import_preserves_mail_password(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            with patch.multiple(db, **self._storage_patches(root)):
+                self.assertEqual(
+                    db.import_generic_api_emails([{
+                        "email": "generic@example.com",
+                        "password": "mail-secret",
+                        "code_url": "https://mail.example/code",
+                    }]),
+                    (1, 0),
+                )
+
+                row = db.get_generic_api_email_by_email("generic@example.com")
+                self.assertEqual(row["password"], "mail-secret")
+                self.assertEqual(
+                    row["copy_line"],
+                    "generic@example.com----mail-secret----https://mail.example/code",
+                )
+
+    def test_webui_generic_api_import_accepts_optional_password(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            with patch.multiple(db, **self._storage_patches(root)):
+                client = create_app(auth_code="test-auth").test_client()
+                response = client.post(
+                    "/api/outlook/import",
+                    json={
+                        "source": "generic_api",
+                        "text": (
+                            "with-password@example.com----mail-secret----https://mail.example/with-password\n"
+                            "without-password@example.com----https://mail.example/without-password"
+                        ),
+                    },
+                    headers={"X-Auth-Code": "test-auth"},
+                )
+
+                self.assertEqual(response.status_code, 200)
+                self.assertEqual(response.get_json()["inserted"], 2)
+                with_password = db.get_generic_api_email_by_email("with-password@example.com")
+                without_password = db.get_generic_api_email_by_email("without-password@example.com")
+                self.assertEqual(with_password["password"], "mail-secret")
+                self.assertEqual(with_password["code_url"], "https://mail.example/with-password")
+                self.assertEqual(without_password["password"], "")
+                self.assertEqual(without_password["code_url"], "https://mail.example/without-password")
 
     def test_repairs_source_for_legacy_generic_rows(self):
         with tempfile.TemporaryDirectory() as td:

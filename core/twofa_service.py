@@ -22,6 +22,31 @@ _LOCK = threading.Lock()
 _LOG_DIR = Path(__file__).resolve().parent.parent / "注册日志"
 
 
+def _sync_remote_after_twofa(account_id: int, email: str) -> dict:
+    """同步 2FA 结束后的最新账号；失败也同步基础账号，避免阻断注册。"""
+    try:
+        from config import remote_import as remote_cfg
+        if not bool(getattr(remote_cfg, "REMOTE_IMPORT_ENABLED", False)):
+            return {"status": "skipped", "ok": True, "message": "未启用远程导入"}
+        account = db.get_account(int(account_id))
+        if not account:
+            return {"status": "failed", "ok": False, "message": "账号不存在"}
+        from core.remote_import import push_account
+        result = push_account(account, force=True)
+        db.update_account_remote_import(int(account_id), result)
+        _append_log(email, f"[Space] 2FA 结束后同步：{result.get('status')} {result.get('message', '')}")
+        return result
+    except Exception as exc:
+        result = {"status": "failed", "ok": False, "message": f"{type(exc).__name__}: {str(exc)[:180]}"}
+        try:
+            db.update_account_remote_import(int(account_id), result)
+            _append_log(email, f"[Space] 同步失败：{result['message']}")
+        except Exception:
+            pass
+        logger.warning("[Space] 2FA 结束后同步失败：%s", result["message"])
+        return result
+
+
 def log_path(email: str) -> Path:
     safe = str(email or "").replace("/", "_").replace("\\", "_").replace(":", "_")
     return _LOG_DIR / f"twofa-{safe}.log"
@@ -84,6 +109,7 @@ def _run_twofa(*, account_id: int, email: str, access_token: str, proxy: str | N
             account_id,
             {"ok": True, "status": "success", "totp_secret": secret, "message": "2FA 设置完成"},
         )
+        _sync_remote_after_twofa(account_id, email)
         _append_log(email, f"[2FA] 完成：secret={secret[:4]}...{secret[-4:]}")
         logger.info("[2FA] 完成：email=%s secret=%s...%s", email, secret[:4], secret[-4:])
         return {"ok": True, "status": "success", "totp_secret": secret, "message": "2FA 设置完成"}
@@ -93,6 +119,9 @@ def _run_twofa(*, account_id: int, email: str, access_token: str, proxy: str | N
             db.update_account_totp_secret(account_id, result)
         except Exception:
             logger.exception("[2FA] 写回失败状态失败: account_id=%s", account_id)
+        # 注册成功后的基础账号必须已经推送；这里再次同步可补偿首次推送失败，
+        # 同时明确把账号保持为“无 2FA”，不影响注册结果。
+        _sync_remote_after_twofa(account_id, email)
         try:
             _append_log(email, f"[2FA] 失败：{result['error']}")
         except Exception:
