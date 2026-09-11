@@ -6144,11 +6144,15 @@ function renderRegistrationDriverField(f) {
 function renderRegistrationSettingsSection(fields) {
   const driver = fields.find(f => f.key === 'REGISTRATION_DRIVER') || fields[0];
   const autoPlan = fields.find(f => f.key === 'AUTO_PLAN_CHECK_AFTER_REGISTER');
+  const passwordSwitch = fields.find(f => f.key === 'ENABLE_POST_REGISTER_PASSWORD');
+  const passwordInputs = fields.filter(f => ['CHATGPT_PASSWORD_MODE', 'CHATGPT_FIXED_PASSWORD', 'PASSWORD_SETUP_RETRIES'].includes(f.key));
   return `
     <div class="config-section-v2-body config-section-v2-body--single">
       ${driver ? renderRegistrationDriverField(driver) : '<div class="banner warn">未找到注册方式配置项</div>'}
     </div>
     ${autoPlan ? `<div class="config-switches-v2" style="margin-top:14px;">${renderFeatureSwitchField(autoPlan, { withIcon: false })}</div>` : ''}
+    ${passwordSwitch ? `<div class="config-switches-v2" style="margin-top:14px;">${renderFeatureSwitchField(passwordSwitch, { withIcon: false })}</div>` : ''}
+    ${passwordInputs.length ? `<div class="config-section-v2-body" style="margin-top:14px;">${passwordInputs.map(renderConfigPlainFieldV2).join('')}</div>` : ''}
   `;
 }
 function renderFeatureSwitchField(f, opts = {}) {
