@@ -56,6 +56,24 @@ EDITABLE_FIELDS = [
         "label": "注册后自动查套餐", "help": "注册成功后自动入队查询套餐/Plus 资格；关闭后仅保存账号，不自动查套餐",
     },
     {
+        "key": "ENABLE_POST_REGISTER_PASSWORD", "file": "password.py", "type": "bool", "group": "注册方式",
+        "label": "注册后自动设置 ChatGPT 密码", "help": "注册成功后在同一认证会话中再次收验证码并调用 password/add；已有密码的账号自动跳过",
+    },
+    {
+        "key": "CHATGPT_PASSWORD_MODE", "file": "password.py", "type": "str", "group": "注册方式",
+        "label": "ChatGPT 密码模式", "help": "fixed=固定密码；random=每个账号自动生成随机强密码",
+        "options": ["random", "fixed"],
+    },
+    {
+        "key": "CHATGPT_FIXED_PASSWORD", "file": "password.py", "type": "str", "group": "注册方式",
+        "label": "固定 ChatGPT 密码", "help": "选择 fixed 模式时使用；选择 random 模式会忽略此字段",
+        "secret": True,
+    },
+    {
+        "key": "PASSWORD_SETUP_RETRIES", "file": "password.py", "type": "int", "group": "注册方式",
+        "label": "密码设置失败重试次数", "help": "验证码错误、接口失败或回调失败时的最大重试次数",
+    },
+    {
         "key": "REMOTE_IMPORT_ENABLED", "file": "remote_import.py", "type": "bool", "group": "Space Merge 推送",
         "label": "启用远程导入", "help": "注册成功拿到 AT 后，自动推送到 chatgpt-space-merge 的 Free 账号管理",
     },

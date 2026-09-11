@@ -1667,6 +1667,125 @@ def get_account_by_email(email: str) -> dict | None:
         row = _find_by_email(_load_accounts(), email)
         return _decorate_account(row) if row else None
 
+
+def account_has_chatgpt_password(row: dict | None) -> bool:
+    """判断账号是否已经保存 ChatGPT 密码（邮箱密码不算）。"""
+    row = row or {}
+    extra = row.get("extra_json")
+    if isinstance(extra, str) and extra.strip():
+        try:
+            extra = json.loads(extra)
+        except Exception:
+            extra = {}
+    if not isinstance(extra, dict):
+        extra = {}
+    return bool(str(extra.get("registration_password") or row.get("registration_password") or "").strip())
+
+
+def claim_account_password_setup(acc_id: int, trigger: str = "manual") -> bool:
+    """原子占用添加密码任务；已有密码或任务运行中时拒绝。"""
+    with _LOCK:
+        rows = _load_accounts()
+        row = next((r for r in rows if int(r.get("id") or 0) == int(acc_id)), None)
+        if row is None or account_has_chatgpt_password(row):
+            return False
+        if row.get("password_setup_status") in {"queued", "running"}:
+            return False
+        now = _now()
+        row.update({
+            "password_setup_status": "queued",
+            "password_setup_ok": False,
+            "password_setup_trigger": str(trigger or "manual"),
+            "password_setup_queued_at": now,
+            "password_setup_started_at": None,
+            "password_setup_completed_at": None,
+            "password_setup_error": None,
+            "password_setup_message": "已入队",
+            "updated_at": now,
+        })
+        _save_accounts(rows)
+        return True
+
+
+def mark_account_password_setup_running(acc_id: int) -> bool:
+    with _LOCK:
+        rows = _load_accounts()
+        row = next((r for r in rows if int(r.get("id") or 0) == int(acc_id)), None)
+        if row is None or row.get("password_setup_status") not in {"queued", "running"}:
+            return False
+        now = _now()
+        row.update({"password_setup_status": "running", "password_setup_started_at": now, "password_setup_error": None, "updated_at": now})
+        _save_accounts(rows)
+        return True
+
+
+def update_account_password(acc_id: int, password: str | None = None, result: dict | None = None) -> bool:
+    """写回添加密码结果与状态；成功时合并最新 ChatGPT session。"""
+    result = result or {}
+    with _LOCK:
+        rows = _load_accounts()
+        row = next((r for r in rows if int(r.get("id") or 0) == int(acc_id)), None)
+        if row is None:
+            return False
+        ok = bool(result.get("ok"))
+        status = str(result.get("status") or ("success" if ok else "failed"))
+        now = _now()
+        row["password_setup_status"] = status
+        row["password_setup_ok"] = bool(ok and status == "success")
+        row["password_setup_error"] = None if ok else result.get("error")
+        row["password_setup_message"] = result.get("message") or ("密码设置完成" if ok else "密码设置失败")
+        if status in {"success", "failed", "stopped"}:
+            row["password_setup_completed_at"] = now
+        value = str(password or result.get("password") or "").strip()
+        if ok and value:
+            extra_raw = row.get("extra_json")
+            if isinstance(extra_raw, str) and extra_raw.strip():
+                try:
+                    extra = json.loads(extra_raw)
+                except Exception:
+                    extra = {}
+            elif isinstance(extra_raw, dict):
+                extra = dict(extra_raw)
+            else:
+                extra = {}
+            extra["registration_password"] = value
+            session = result.get("session")
+            if isinstance(session, dict) and session:
+                extra["chatgpt_session"] = session
+                if session.get("accessToken"):
+                    row["access_token"] = session.get("accessToken")
+                user = session.get("user") or {}
+                account = session.get("account") or {}
+                if user.get("id"):
+                    row["user_id"] = user.get("id")
+                if user.get("name") is not None:
+                    row["user_name"] = user.get("name")
+                if account.get("planType"):
+                    row["plan_type"] = account.get("planType")
+                if session.get("expires"):
+                    row["expires_at"] = session.get("expires")
+            row["extra_json"] = json.dumps(extra, ensure_ascii=False)
+            row["copy_line"] = _account_line(row)
+        row["updated_at"] = now
+        _save_accounts(rows)
+        return True
+
+
+def recover_interrupted_password_setups() -> int:
+    """服务重启时把未完成的密码任务标记为失败。"""
+    with _LOCK:
+        rows = _load_accounts()
+        now = _now()
+        count = 0
+        for row in rows:
+            if row.get("password_setup_status") not in {"queued", "running"}:
+                continue
+            row.update({"password_setup_status": "failed", "password_setup_ok": False, "password_setup_error": "WebUI 重启导致密码设置中断，请重新操作", "password_setup_completed_at": now, "updated_at": now})
+            count += 1
+        if count:
+            _save_accounts(rows)
+        return count
+
 def update_account_remote_import(acc_id: int, result: dict | None = None) -> bool:
     result = result or {}
     with _LOCK:

@@ -17,6 +17,7 @@ config 包的统一入口。
     config.register          注册默认信息（邮箱、密码、名称、生日）
     config.email             Outlook 邮箱账号池 + OTP 轮询
     config.twofa             2FA 开关
+    config.password          注册后 ChatGPT 密码设置
 """
 
 # ---------- 浏览器 / HTTP ----------
@@ -196,6 +197,14 @@ _RELOADABLE_SUBMODULES = (
     "config.sub2api",
     "config.humanize",
     "config.remote_import",
+)
+
+# ---------- ChatGPT 密码设置 ----------
+from config.password import (
+    ENABLE_POST_REGISTER_PASSWORD,
+    CHATGPT_PASSWORD_MODE,
+    CHATGPT_FIXED_PASSWORD,
+    PASSWORD_SETUP_RETRIES,
 )
 
 

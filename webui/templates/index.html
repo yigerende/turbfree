@@ -2252,6 +2252,7 @@
         </div>
         <div class="acc-v2-btn-group">
           <span class="acc-v2-btn-group-title">批量</span>
+          <button type="button" class="jobs-tb-btn jobs-tb-btn--primary" id="btnSetupSelectedPasswordV2" disabled title="给没有 ChatGPT 密码的选中账号重新登录并添加密码；已有密码自动跳过">批量添加密码</button>
           <button type="button" class="jobs-tb-btn jobs-tb-btn--primary" id="btnSetupSelectedTotpV2" disabled title="给选中的账号批量开启 2FA，并在完成后写回 TOTP 密钥">批量开2FA</button>
           <button type="button" class="jobs-tb-btn jobs-tb-btn--good" id="btnNoteSelectedAccountsV2" disabled title="给选中的账号统一设置备注，留空可清空备注">备注</button>
           <button type="button" class="jobs-tb-btn jobs-tb-btn--good" id="btnCopySelectedLinesV2" disabled title="复制选中账号的完整整行，每个账号一行">复制行</button>
@@ -3520,6 +3521,17 @@ function _codexAction(r) {
   const label = s === 'success' ? '重新补跑 Codex' : '补跑 Codex';
   return `<button data-codex-retry="${esc(r.email)}" title="重新跑一次 Codex 授权（会消耗 1 封邮箱 OTP + 1 个接码短信）">${label}</button>`;
 }
+function _passwordCellV2(r) {
+  if (r.chatgpt_password_set || r.password) {
+    return `<span class="mono" title="ChatGPT 密码已保存">${esc(short(r.password || '已设置', 18))}</span>`;
+  }
+  const status = r.password_setup_status || '';
+  const title = r.password_setup_message || r.password_setup_error || '';
+  if (status === 'queued') return `<span class="pill status-running" title="${esc(title)}">设置密码排队中</span>`;
+  if (status === 'running') return `<span class="pill status-running" title="${esc(title)}">设置密码中</span>`;
+  if (status === 'failed') return `<span class="pill status-failed" title="${esc(title)}">密码设置失败</span>`;
+  return '<span class="acc-v2-muted">未设置</span>';
+}
 function _tokenCellV2(r) {
   const live = r.live_check_status || '';
   const push = r.remote_import_status || '';
@@ -3552,6 +3564,9 @@ function _accountsV2MoreMenu(r) {
     _planAction(r),
     _extractLinkAction(r),
     _codexAction(r),
+    !r.chatgpt_password_set && !['queued', 'running'].includes(r.password_setup_status)
+      ? `<button type="button" data-account-password-setup="${esc(r.id)}" title="重新登录并添加 ChatGPT 密码">添加密码</button>`
+      : '',
     `<button type="button" data-codex-log="${esc(r.email)}" title="查看该账号最近一次 Codex 补跑日志">补跑日志</button>`,
     `<button type="button" data-account-archive="${esc(r.id)}" data-archived="${r.archived ? '0' : '1'}" title="${r.archived ? '恢复到默认账号列表' : '归档后默认账号列表不再显示'}">${r.archived ? '恢复' : '归档'}</button>`,
   ].filter(html => String(html || '').trim());
@@ -3592,7 +3607,7 @@ function renderAccounts() {
       </td>
       <td class="col-source">${esc(r.email_source || '-')}</td>
       <td class="col-token">${_tokenCellV2(r)}</td>
-      <td class="col-password">${r.password ? `<span class="mono" title="${esc(r.password)}">${esc(short(r.password, 18))}</span>` : '<span class="acc-v2-muted">-</span>'}</td>
+      <td class="col-password">${_passwordCellV2(r)}</td>
       <td class="col-plan">${_planCell(r)}<div class="acc-v2-sub">${_extractLinkCell(r)}</div></td>
       <td class="col-note" title="${esc(r.note || '')}">${r.note ? esc(short(r.note, 80)) : '<span class="acc-v2-muted">-</span>'}</td>
       <td class="col-small">${_totpCellV2(r)}</td>
@@ -3600,6 +3615,7 @@ function renderAccounts() {
       <td class="col-time" title="${esc(r.created_at || '-')}">${esc(r.created_at || '-')}</td>
       <td class="col-actions">
         <div class="acc-v2-actions">
+          ${r.chatgpt_password_set ? '<button type="button" disabled title="该账号已有 ChatGPT 密码">已有密码</button>' : (['queued','running'].includes(r.password_setup_status) ? '<button type="button" disabled title="密码设置任务执行中">设置中…</button>' : `<button type="button" class="primary" data-account-password-setup="${esc(r.id)}" title="重新登录并添加 ChatGPT 密码">添加密码</button>`)}
           <button type="button" class="danger" data-account-delete="${esc(r.id)}" data-email="${esc(r.email)}">删除</button>
           <div class="acc-v2-more">
             <button type="button" class="acc-v2-more-btn" data-acc-more-toggle aria-haspopup="true" aria-expanded="false">更多</button>
@@ -3628,6 +3644,7 @@ function updateAccountSelectionUi(pageRows = null) {
     'btnCheckSelectedPlansV2', 'btnExtractSelectedLinksV2',
     'btnRetrySelectedCodexV2', 'btnDownloadSelectedCpaV2', 'btnStopSelectedCodexV2',
     'btnSetupSelectedTotpV2', 'btnNoteSelectedAccountsV2', 'btnCopySelectedLinesV2', 'btnCopySelectedTokensV2', 'btnCopySelectedEmailsV2',
+    'btnSetupSelectedPasswordV2',
     'btnDownloadSelectedTxtV2', 'btnArchiveSelectedAccountsV2', 'btnDeleteSelectedAccountsV2',
     'btnPushSelectedRemoteV2',
   ];
@@ -3860,6 +3877,12 @@ async function onAccountsBodyClick(e) {
   const totpBtn = e.target.closest('[data-account-totp-setup]');
   if (totpBtn) {
     await setupAccountTotp(Number(totpBtn.dataset.accountTotpSetup), totpBtn);
+    return;
+  }
+
+  const passwordBtn = e.target.closest('[data-account-password-setup]');
+  if (passwordBtn) {
+    await setupAccountPassword(Number(passwordBtn.dataset.accountPasswordSetup), passwordBtn);
     return;
   }
 
@@ -4189,6 +4212,58 @@ async function setupSelectedTotp() {
     await pollAccountPlanStatuses();
   } catch (err) {
     showToast('批量开启 2FA 失败: ' + err.message);
+  } finally {
+    btn.textContent = oldText;
+    updateAccountSelectionUi();
+  }
+}
+
+async function setupAccountPassword(id, btn) {
+  const acc = ACCOUNTS.find(a => Number(a.id) === Number(id));
+  const email = acc?.email || '';
+  if (acc?.chatgpt_password_set || acc?.password) {
+    showToast('该账号已有 ChatGPT 密码');
+    return;
+  }
+  if (!confirm(`确定为该账号重新登录并添加 ChatGPT 密码？\n\n${email}\n\n需要从邮箱池读取一次新的验证码。`)) return;
+  if (btn) btn.disabled = true;
+  try {
+    const r = await api(`/api/accounts/${encodeURIComponent(id)}/password-setup`, {
+      method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({}),
+    });
+    showToast(r.message || '密码设置已入队');
+    await loadAccounts();
+  } catch (err) {
+    showToast('添加密码失败: ' + err.message);
+    if (btn) btn.disabled = false;
+  }
+}
+
+async function setupSelectedPassword() {
+  const ids = Array.from(ACCOUNT_SELECTED).map(Number);
+  if (!ids.length) { showToast('请先选择账号'); return; }
+  if (!confirm(`确定为选中的 ${ids.length} 个账号批量添加 ChatGPT 密码？\n\n已有密码、缺少 Token 或正在执行的账号会自动跳过。`)) return;
+  const btn = document.getElementById('btnSetupSelectedPasswordV2');
+  if (!btn) return;
+  const oldText = btn.textContent;
+  btn.disabled = true;
+  btn.textContent = '入队中…';
+  try {
+    const r = await api('/api/accounts/password-setup-bulk', {
+      method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({account_ids: ids}),
+    });
+    (r.started || []).forEach(item => ACCOUNT_SELECTED.delete(Number(item.id)));
+    const skippedCount = Number(r.skipped_count ?? (r.skipped || []).length) || 0;
+    const busyCount = Number(r.busy_count ?? (r.busy || []).length) || 0;
+    const failedCount = Number(r.failed_count ?? (r.failed || []).length) || 0;
+    const details = [];
+    if (skippedCount) details.push(`跳过 ${skippedCount} 个`);
+    if (busyCount) details.push(`进行中 ${busyCount} 个`);
+    if (failedCount) details.push(`失败 ${failedCount} 个`);
+    showToast(`已入队 ${r.started_count || 0} 个${details.length ? '，' + details.join('，') : ''}`);
+    await loadAccounts();
+  } catch (err) {
+    showToast('批量添加密码失败: ' + err.message);
   } finally {
     btn.textContent = oldText;
     updateAccountSelectionUi();
@@ -4962,6 +5037,7 @@ async function pushSelectedRemote() {
   bind('btnDownloadSelectedCpaV2', downloadSelectedCpa);
   bind('btnStopSelectedCodexV2', stopSelectedCodex);
   bind('btnSetupSelectedTotpV2', setupSelectedTotp);
+  bind('btnSetupSelectedPasswordV2', setupSelectedPassword);
   bind('btnNoteSelectedAccountsV2', noteSelectedAccounts);
   bind('btnCopySelectedLinesV2', copySelectedAccountLines);
   bind('btnCopySelectedTokensV2', copySelectedAccountTokens);
@@ -6115,7 +6191,14 @@ function renderConfigRecommendedLinks(f) {
 function renderConfigPlainFieldV2(f) {
   const fv = Object.prototype.hasOwnProperty.call(CONFIG_PENDING_UPDATES, f.key) ? CONFIG_PENDING_UPDATES[f.key] : f.value;
   let control = '';
-  if (f.type === 'int') {
+  if (Array.isArray(f.options) && f.options.length) {
+    const current = String(fv == null ? '' : fv);
+    control = `<select data-key="${attrEsc(f.key)}">${f.options.map(option => {
+      const value = String(option?.value ?? option);
+      const label = String(option?.label ?? option);
+      return `<option value="${attrEsc(value)}"${value === current ? ' selected' : ''}>${esc(label)}</option>`;
+    }).join('')}</select>`;
+  } else if (f.type === 'int') {
     control = `<input type="number" data-key="${attrEsc(f.key)}" value="${attrEsc(fv == null ? '' : fv)}">`;
   } else if (f.type === 'float') {
     control = `<input type="number" step="0.1" data-key="${attrEsc(f.key)}" value="${attrEsc(fv == null ? '' : fv)}">`;

@@ -92,6 +92,7 @@ def _compact_account_for_list(row: dict) -> dict:
         "email": row.get("email"),
         "has_access_token": bool(str(row.get("access_token") or "").strip()),
         "totp_enabled": bool(row.get("totp_secret")),
+        "chatgpt_password_set": db.account_has_chatgpt_password(row),
         "codex_agent_has_token": bool(str(row.get("codex_agent_token") or "").strip()),
     }
 
@@ -149,6 +150,8 @@ def _compact_account_for_list(row: dict) -> dict:
         # Space Merge 推送状态。
         "remote_import_status", "remote_import_message", "remote_import_at",
         "totp_setup_error", "totp_setup_message", "totp_setup_started_at", "totp_setup_completed_at",
+        "password_setup_status", "password_setup_error", "password_setup_message",
+        "password_setup_started_at", "password_setup_completed_at",
     )
     for key in optional_keys:
         value = row.get(key)
@@ -344,6 +347,9 @@ def create_app(auth_code: str | None = None) -> Flask:
     recovered_totp_setups = db.recover_interrupted_totp_setups()
     if recovered_totp_setups:
         logger.warning("已恢复 %s 个因 WebUI 重启中断的 2FA 状态", recovered_totp_setups)
+    recovered_password_setups = db.recover_interrupted_password_setups()
+    if recovered_password_setups:
+        logger.warning("已恢复 %s 个因 WebUI 重启中断的密码设置状态", recovered_password_setups)
 
     # ----------------------------------------------------------
     # 页面
@@ -765,6 +771,91 @@ def create_app(auth_code: str | None = None) -> Flask:
             "failed_count": len(failed),
             "skipped": skipped,
             "skipped_count": len(skipped),
+        }), 202
+
+    @app.post("/api/accounts/<int:acc_id>/password-setup")
+    def api_account_password_setup(acc_id: int):
+        """为没有 ChatGPT 密码的账号重新登录并添加密码。"""
+        acc = db.get_account(acc_id)
+        if not acc:
+            return jsonify({"ok": False, "error": "账号不存在"}), 404
+        if db.account_has_chatgpt_password(acc):
+            return jsonify({"ok": False, "error": "该账号已经有 ChatGPT 密码"}), 409
+        if not str(acc.get("access_token") or "").strip():
+            return jsonify({"ok": False, "error": "该账号没有 access_token"}), 400
+        try:
+            from core import password_setup_service
+            queued = password_setup_service.enqueue(
+                acc_id,
+                str(acc.get("email") or ""),
+                str(acc.get("proxy_used") or "") or None,
+                trigger="manual",
+            )
+        except Exception as exc:
+            return jsonify({"ok": False, "error": f"密码服务加载失败：{type(exc).__name__}: {exc}"}), 503
+        public = {k: v for k, v in queued.items() if k != "future"}
+        if queued.get("skipped"):
+            return jsonify({"ok": False, **public}), 409
+        if queued.get("busy"):
+            return jsonify({"ok": False, **public}), 409
+        if not queued.get("accepted"):
+            return jsonify({"ok": False, **public}), 503
+        return jsonify({"ok": True, "started": True, **public}), 202
+
+    @app.post("/api/accounts/password-setup-bulk")
+    def api_accounts_password_setup_bulk():
+        """批量为没有 ChatGPT 密码的账号入队。已有密码的账号自动跳过。"""
+        data = request.get_json(silent=True) or {}
+        ids = data.get("account_ids") or data.get("ids") or []
+        if not isinstance(ids, list) or not ids:
+            return jsonify({"ok": False, "error": "account_ids 必须是非空数组"}), 400
+        if len(ids) > 500:
+            return jsonify({"ok": False, "error": "单次最多提交 500 个账号"}), 400
+        started, skipped, busy, failed = [], [], [], []
+        seen = set()
+        try:
+            from core import password_setup_service
+        except Exception as exc:
+            return jsonify({"ok": False, "error": f"密码服务加载失败：{type(exc).__name__}: {exc}"}), 503
+        for raw in ids:
+            try:
+                acc_id = int(raw)
+            except (TypeError, ValueError):
+                skipped.append({"id": raw, "reason": "ID 非法"})
+                continue
+            if acc_id in seen:
+                continue
+            seen.add(acc_id)
+            acc = db.get_account(acc_id)
+            if not acc:
+                skipped.append({"id": acc_id, "reason": "账号不存在"})
+                continue
+            email = str(acc.get("email") or "")
+            if db.account_has_chatgpt_password(acc):
+                skipped.append({"id": acc_id, "email": email, "reason": "该账号已经有 ChatGPT 密码"})
+                continue
+            if not str(acc.get("access_token") or "").strip():
+                skipped.append({"id": acc_id, "email": email, "reason": "缺少 access_token"})
+                continue
+            result = password_setup_service.enqueue(acc_id, email, str(acc.get("proxy_used") or "") or None, trigger="manual_bulk")
+            public = {k: v for k, v in result.items() if k != "future"}
+            item = {"id": acc_id, "email": email, **public}
+            if result.get("accepted"):
+                item["status"] = "queued"
+                started.append(item)
+            elif result.get("skipped"):
+                skipped.append({"id": acc_id, "email": email, "reason": result.get("error") or "已有密码"})
+            elif result.get("busy"):
+                busy.append(item)
+            else:
+                failed.append(item)
+        return jsonify({
+            "ok": True,
+            "message": f"已入队 {len(started)} 个密码设置任务",
+            "started": started, "started_count": len(started),
+            "skipped": skipped, "skipped_count": len(skipped),
+            "busy": busy, "busy_count": len(busy),
+            "failed": failed, "failed_count": len(failed),
         }), 202
 
     @app.post("/api/accounts/note-bulk")

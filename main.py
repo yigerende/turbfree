@@ -16,6 +16,7 @@ from config import twofa as _twofa_cfg
 from config import email as _email_cfg
 from config import roxybrowser as _roxy_cfg
 from config import openai_protocol as _protocol_cfg
+from config import password as _password_cfg
 from core.session import BrowserSession
 from core.chatgpt_auth import get_providers, get_csrf_token, signin_openai
 from core.openai_auth import (
@@ -36,6 +37,7 @@ from core.account_export import (
     save_account_data,
     create_batch_archive_dir,
 )
+from core.password_service import add_password
 from core.email_provider import acquire_email, wait_for_otp
 from core.humanize import delay as human_delay
 from core.name_samples import random_display_name
@@ -516,7 +518,31 @@ def run_registration(
                 )
             human_delay("post_auth")
 
-        # ==================== 阶段7: 设置 2FA（受 config.ENABLE_2FA 控制）====================
+        # ==================== 阶段7: 注册后设置 ChatGPT 密码 ====================
+        # 密码添加必须复用注册 BrowserSession；OpenAI 会再次发送邮箱 OTP，
+        # 校验后进入 reset-password/new-password，再调用 password/add。
+        gpt_password = None
+        if bool(getattr(_password_cfg, "ENABLE_POST_REGISTER_PASSWORD", False)):
+            password_attempts = max(1, min(5, int(getattr(_password_cfg, "PASSWORD_SETUP_RETRIES", 2) or 2)))
+            for password_attempt in range(1, password_attempts + 1):
+                try:
+                    logger.info("[密码] 注册后设置 ChatGPT 密码 (%s/%s)", password_attempt, password_attempts)
+                    password_result = add_password(session, email)
+                    gpt_password = str(password_result.get("password") or "").strip() or None
+                    refreshed = password_result.get("session")
+                    if isinstance(refreshed, dict) and refreshed.get("accessToken"):
+                        session_info = refreshed
+                        access_token = str(refreshed.get("accessToken") or access_token)
+                    logger.info("[密码] ChatGPT 密码设置完成：%s", email)
+                    break
+                except Exception as exc:
+                    logger.warning("[密码] 设置失败 (%s/%s)：%s", password_attempt, password_attempts, str(exc)[:240])
+                    if password_attempt >= password_attempts:
+                        logger.error("[密码] 已达到最大重试次数，将保存账号但不写入 ChatGPT 密码")
+        else:
+            logger.debug("已跳过注册后 ChatGPT 密码设置 (ENABLE_POST_REGISTER_PASSWORD=False)")
+
+        # ==================== 阶段8: 设置 2FA（受 config.ENABLE_2FA 控制）====================
         totp_secret = None
         if _twofa_cfg.ENABLE_2FA:
             # 步骤14-20: 重认证（要再收一次邮箱 OTP）→ enroll TOTP → activate
@@ -575,6 +601,7 @@ def run_registration(
                 "device_id": session.device_id,
                 "sentinel_sid": getattr(session, "sentinel_sid", None),
                 "browser_profile": getattr(session, "browser_profile", None),
+                "registration_password": gpt_password,
                 "codex": codex_result,
             },
         )

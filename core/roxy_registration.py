@@ -2113,6 +2113,49 @@ def _fetch_chatgpt_session(driver, timeout: int = 90, auto_jump_wait: int = 15) 
     raise RuntimeError(f"等待 /api/auth/session accessToken 超时，最后响应: {str(last_data)[:800]}")
 
 
+def _add_post_register_password_in_roxy(driver, email: str, proxy: str | None = None) -> dict:
+    """复用当前 Roxy 浏览器的登录 Cookie，通过同一认证链路添加 ChatGPT 密码。
+
+    密码接口本身是 OpenAI 的协议接口；Roxy 只负责提供已登录的 Cookie、设备环境
+    和出口代理。这样无头模式也能完成第二次邮箱 OTP，不需要弹出人工窗口。
+    """
+    from config import password as password_cfg
+    if not bool(getattr(password_cfg, "ENABLE_POST_REGISTER_PASSWORD", False)):
+        return {}
+    from core.password_service import add_password
+    from core.session import BrowserSession
+
+    cookies = list(driver.get_cookies() or [])
+    device_id = next((str(c.get("value") or "").strip() for c in cookies if str(c.get("name") or "").lower() == "oai-did"), "")
+    proxy_text = str(proxy or "").strip()
+    if proxy_text and "://" not in proxy_text:
+        proxy_text = "http://" + proxy_text
+    http_session = BrowserSession(
+        proxy=proxy_text or None,
+        device_id=device_id or None,
+        fingerprint_seed=f"roxy-password:{str(email).strip().lower()}",
+    )
+    for item in cookies:
+        name = str(item.get("name") or "").strip()
+        value = str(item.get("value") or "")
+        if not name:
+            continue
+        domain = str(item.get("domain") or "").strip().lstrip(".") or "chatgpt.com"
+        path = str(item.get("path") or "/")
+        try:
+            http_session.session.cookies.set(name, value, domain=domain, path=path)
+        except Exception:
+            try:
+                http_session.session.cookies.set(name, value)
+            except Exception:
+                pass
+    logger.info("[Roxy注册] 注册后自动设置 ChatGPT 密码：复用当前浏览器 Cookie，等待第二次邮箱验证码：%s", email)
+    result = add_password(http_session, email, after_ts=time.time())
+    if not isinstance(result, dict) or not result.get("session"):
+        raise RuntimeError("密码设置完成但未读取到最新 ChatGPT session")
+    return result
+
+
 def _check_manual_stop() -> None:
     try:
         from core.registration_service import check_stop_requested
@@ -2286,6 +2329,32 @@ def run_roxy_registration(
         access_token = session_info["accessToken"]
         logger.info("[Roxy注册] 已拿到 accessToken：%s", email)
         _check_manual_stop()
+
+        # 注册完成后按配置再走一次 OpenAI 添加密码流程。失败不回滚已完成的注册，
+        # 账号仍会落库，列表中会明确显示未设置密码，后续可手动重试。
+        try:
+            if openai_password:
+                logger.info("[Roxy注册] 注册流程已设置 ChatGPT 密码，跳过注册后重复添加：%s", email)
+            else:
+                from config import password as _password_cfg
+                password_attempts = max(1, min(5, int(getattr(_password_cfg, "PASSWORD_SETUP_RETRIES", 2) or 2)))
+                for password_attempt in range(1, password_attempts + 1):
+                    try:
+                        password_result = _add_post_register_password_in_roxy(driver, email, proxy)
+                        openai_password = str(password_result.get("password") or "").strip() or None
+                        latest_session = password_result.get("session")
+                        if isinstance(latest_session, dict) and latest_session.get("accessToken"):
+                            session_info = latest_session
+                            access_token = latest_session["accessToken"]
+                            logger.info("[Roxy注册] 注册后 ChatGPT 密码设置完成，已写回最新 session：%s", email)
+                        break
+                    except Exception as exc:
+                        logger.warning("[Roxy注册] 注册后密码设置失败 (%s/%s)：%s", password_attempt, password_attempts, str(exc)[:240])
+                        if password_attempt >= password_attempts:
+                            raise
+        except Exception as exc:
+            logger.warning("[Roxy注册] 注册后自动设置 ChatGPT 密码失败，继续保存账号：%s: %s", type(exc).__name__, str(exc)[:240])
+        _traffic_checkpoint()
 
         if _twofa_cfg.ENABLE_2FA:
             logger.info("[Roxy注册] 账号保存并首次推送后，将由统一后台队列设置 2FA")
